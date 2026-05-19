@@ -1,0 +1,6 @@
+*.zip
+batch_ocr_output/
+ocr_work/
+final_txt/
+__pycache__/
+*.zip *.pdf batch_ocr_output/ ocr_work/ final_txt/ __pycache__/

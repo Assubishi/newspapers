@@ -1,0 +1,22 @@
+# OCR pipeline requirements
+# Target: local Windows environment with Python 3.11.x and NVIDIA GPU.
+# Install with:
+#   python -m pip install -r requirements.txt
+#
+# Tesseract OCR is NOT installed by pip. Install it separately:
+#   winget install --id UB-Mannheim.TesseractOCR -e
+# Then check Kazakh language data:
+#   "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
+
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+numpy==2.3.5
+pillow==12.2.0
+PyMuPDF>=1.24.0
+
+paddlepaddle-gpu==3.2.2
+paddleocr==3.5.0
+paddlex[ocr]==3.5.2
+
+# Sometimes needed by PaddleX/PP-StructureV3 imports.
+langchain-text-splitters
