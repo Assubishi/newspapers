@@ -1,0 +1,199 @@
+Add these files into colab
+
+hybrid_ppstructure_tesseract.py, 
+remove_page_furniture_preserve_blanks.py,
+run_batch_zip_ocr.py
+run_hybrid_fast_reuse
+.zip files
+
+
+Cell 1
+
+# === CLEAN INSTALL FOR COLAB T4 GPU ===
+
+!apt-get update -qq
+!apt-get install -y -qq tesseract-ocr tesseract-ocr-kaz tesseract-ocr-eng
+
+# Remove packages that commonly conflict in Colab
+!python -m pip uninstall -y torch torchvision torchaudio
+!python -m pip uninstall -y paddleocr paddlex paddlepaddle paddlepaddle-gpu
+!python -m pip uninstall -y numpy pillow
+
+# Remove NVIDIA Python CUDA wheels left by Torch, so Paddle can install its own compatible CUDA 12.6 wheels
+!python -m pip freeze | grep '^nvidia-' | xargs -r python -m pip uninstall -y
+
+# Base versions matching your laptop as closely as possible
+!python -m pip install --no-cache-dir -q "numpy==2.3.5" "pillow==12.2.0" pymupdf
+
+# Install CPU-only Torch so modelscope can import torch without CUDA/NCCL conflicts
+!python -m pip install --no-cache-dir -q torch==2.6.0+cpu torchvision==0.21.0+cpu torchaudio==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# Install the same Paddle GPU version as your laptop, CUDA 12.6 build
+!python -m pip install --no-cache-dir -q paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+# Install same OCR stack as your laptop
+!python -m pip install --no-cache-dir -q "paddleocr==3.5.0" "paddlex[ocr]==3.5.2"
+
+# Re-pin numpy/pillow because dependencies may try to change them
+!python -m pip install --no-cache-dir -q --force-reinstall "numpy==2.3.5" "pillow==12.2.0"
+
+
+
+Cell 2
+
+!python -m pip install -q langchain-text-splitters
+
+Cell 3
+
+!python -m pip uninstall -y torchcodec
+
+Cell 4
+
+!tesseract --list-langs
+!nvidia-smi
+
+import numpy
+import PIL
+print("numpy:", numpy.__version__)
+print("Pillow:", PIL.__version__)
+
+import torch
+print("torch:", torch.__version__)
+print("torch cuda:", torch.cuda.is_available())
+
+import paddle
+print("paddle:", paddle.__version__)
+print("paddle cuda devices:", paddle.device.cuda.device_count())
+
+from paddleocr import PPStructureV3
+print("PPStructureV3 import OK")
+
+
+Cell 5
+
+%%writefile batch_ocr_newspapers.py
+import argparse
+import shutil
+import subprocess
+import zipfile
+from pathlib import Path
+
+import fitz
+
+
+def run(cmd):
+    print("\n>>> " + " ".join(str(x) for x in cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+
+def count_pages(pdf_path: Path) -> int:
+    doc = fitz.open(str(pdf_path))
+    pages = len(doc)
+    doc.close()
+    return pages
+
+
+def unzip_if_needed(zip_path: Path, input_dir: Path):
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_pdfs = list(input_dir.rglob("*.pdf"))
+    if existing_pdfs:
+        print(f"PDFs already extracted: {len(existing_pdfs)}")
+        return
+
+    print(f"Unzipping {zip_path} -> {input_dir}")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(input_dir)
+
+
+def safe_name(path: Path) -> str:
+    return path.stem.replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--zip", default="newspapers20.zip")
+    parser.add_argument("--input-dir", default="/content/input_pdfs")
+    parser.add_argument("--work-root", default="/content/ocr_work")
+    parser.add_argument("--final-txt-dir", default="/content/final_txt")
+    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--device", default="gpu:0")
+    parser.add_argument("--lang", default="kaz+eng")
+    parser.add_argument("--limit", type=int, default=0, help="Use 1 or 2 for testing. 0 = all PDFs.")
+    parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--no-furniture-clean", action="store_true")
+    args = parser.parse_args()
+
+    zip_path = Path(args.zip)
+    input_dir = Path(args.input_dir)
+    work_root = Path(args.work_root)
+    final_txt_dir = Path(args.final_txt_dir)
+
+    if not zip_path.exists():
+        raise FileNotFoundError(f"ZIP not found: {zip_path.resolve()}")
+
+    unzip_if_needed(zip_path, input_dir)
+
+    work_root.mkdir(parents=True, exist_ok=True)
+    final_txt_dir.mkdir(parents=True, exist_ok=True)
+
+    pdfs = sorted(input_dir.rglob("*.pdf"))
+    if args.limit > 0:
+        pdfs = pdfs[:args.limit]
+
+    print(f"PDFs to process: {len(pdfs)}")
+
+    for i, pdf in enumerate(pdfs, start=1):
+        name = safe_name(pdf)
+        pdf_work_dir = work_root / name
+        final_txt = final_txt_dir / f"{name}.txt"
+
+        if args.skip_existing and final_txt.exists():
+            print(f"[{i}/{len(pdfs)}] Skipping existing: {final_txt}")
+            continue
+
+        pages = count_pages(pdf)
+        print(f"\n========== [{i}/{len(pdfs)}] {pdf.name} | pages={pages} ==========")
+
+        run([
+            "python",
+            "run_hybrid_fast_reuse.py",
+            "--pdf", str(pdf),
+            "--pages", str(pages),
+            "--dpi", str(args.dpi),
+            "--workers", str(args.workers),
+            "--device", args.device,
+            "--lang", args.lang,
+            "--tesseract", "/usr/bin/tesseract",
+            "--output-root", str(pdf_work_dir),
+        ])
+
+        if args.no_furniture_clean:
+            source_txt = pdf_work_dir / "all_pages_tsv_filtered.txt"
+        else:
+            run([
+                "python",
+                "remove_page_furniture_preserve_blanks.py",
+                "--root", str(pdf_work_dir),
+                "--pages", str(pages),
+            ])
+            source_txt = pdf_work_dir / "all_pages_no_furniture.txt"
+
+        if not source_txt.exists():
+            raise FileNotFoundError(f"Expected TXT not found: {source_txt}")
+
+        shutil.copyfile(source_txt, final_txt)
+        print(f"Saved: {final_txt}")
+
+    zip_base = "/content/final_txt_results"
+    shutil.make_archive(zip_base, "zip", final_txt_dir)
+    print(f"\nDONE: {zip_base}.zip")
+
+
+if __name__ == "__main__":
+    main()
+
+Cell 6:
+
+!python batch_ocr_newspapers.py --zip <name>.zip --dpi 400 --workers 2 --device gpu:0 --skip-existing
