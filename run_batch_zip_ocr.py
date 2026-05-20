@@ -41,6 +41,7 @@ import sys
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
+import re
 
 import fitz
 
@@ -147,6 +148,54 @@ def make_final_zip(final_txt_dir: Path, zip_output: Path) -> None:
         for txt in sorted(final_txt_dir.glob("*.txt")):
             z.write(txt, arcname=txt.name)
 
+def output_text_has_problem(source_txt: Path) -> Tuple[bool, str]:
+    """
+    Detects PDFs that did not crash OCR but produced invalid content,
+    for example Google/website 404 pages.
+    """
+    try:
+        text = source_txt.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return True, f"could_not_read_output_txt:{exc}"
+
+    raw = text.strip()
+    low = raw.lower()
+    compact = re.sub(r"\s+", " ", low)
+
+    # Empty or almost empty output.
+    if len(raw) < 50:
+        return True, "output_too_short"
+
+    # Runtime/script errors accidentally written into TXT.
+    technical_errors = [
+        "traceback",
+        "filenotfounderror",
+        "runtimeerror",
+        "tesseract_error",
+        "pdf not found",
+        "input not found",
+        "could not find",
+        "could not load",
+        "no text blocks left",
+    ]
+
+    for pat in technical_errors:
+        if pat in low:
+            return True, f"technical_error_text:{pat}"
+
+    # Web/Google 404 pages OCRed as if they were newspapers.
+    if "404" in compact and (
+        "requested url was not found" in compact
+        or "not found on this server" in compact
+        or "that's all we know" in compact
+        or "that’s all we know" in compact
+    ):
+        return True, "web_404_page"
+
+    if "requested url was not found" in compact:
+        return True, "requested_url_not_found"
+
+    return False, ""
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -303,6 +352,23 @@ def main() -> None:
             if args.stop_on_error:
                 raise FileNotFoundError(msg)
             continue
+
+        has_problem, reason = output_text_has_problem(source_txt)
+        if has_problem:
+            msg = f"{pdf}\tBAD_OUTPUT_TXT\t{reason}\t{source_txt}"
+            failures.append(msg)
+            print(f"WARNING: {msg}")
+
+            # Do not keep a fake transcript for this bad PDF.
+            if final_txt.exists():
+                final_txt.unlink()
+
+            if args.stop_on_error:
+                raise RuntimeError(msg)
+            continue
+
+        shutil.copyfile(source_txt, final_txt)
+        print(f"Saved TXT: {final_txt}", flush=True)
 
         shutil.copyfile(source_txt, final_txt)
         print(f"Saved TXT: {final_txt}", flush=True)
